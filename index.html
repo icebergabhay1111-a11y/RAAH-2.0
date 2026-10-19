@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0B0D0C">
+<meta name="description" content="Raah: a camera-based walking companion that speaks road hazards aloud for blind and low-vision people.">
+<title>Raah</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Atkinson+Hyperlegible+Mono:wght@500;700&display=swap">
+<style>
+/* Layout: the camera fills the screen; a road-dark control deck sits at the bottom with
+   a three-lane hazard strip (left / ahead / right), the spoken alert, and thumb-size controls. */
+:root{
+  --road:#0B0D0C;        /* asphalt ground */
+  --deck:#141714;        /* control deck */
+  --line:#2A2F29;        /* hairlines */
+  --paper:#F4F2EA;       /* primary text */
+  --muted:#9AA096;       /* secondary text */
+  --marking:#FFC800;     /* road-marking yellow: the accent */
+  --danger:#FF4A3D;      /* very close */
+  --clear:#3DDC97;       /* clear path */
+  --font:"Atkinson Hyperlegible",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono:"Atkinson Hyperlegible Mono",ui-monospace,"SFMono-Regular",Menlo,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--road);color:var(--paper);font-family:var(--font);font-size:17px;line-height:1.4;overflow:hidden;-webkit-tap-highlight-color:transparent}
+[hidden]{display:none!important}
+button,select,input{font:inherit;color:inherit}
+:focus-visible{outline:3px solid var(--marking);outline-offset:3px}
+
+/* Stage */
+#stage{position:fixed;inset:0;background:var(--road)}
+#cam{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:var(--road)}
+#overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+#idle{position:absolute;inset:0;display:grid;place-items:center;padding:24px max(24px,env(safe-area-inset-right,0px)) 40vh max(24px,env(safe-area-inset-left,0px));text-align:center}
+#idle .lane{width:6px;height:40vh;max-height:280px;background:repeating-linear-gradient(to bottom,var(--marking) 0 26px,transparent 26px 48px);margin:0 auto 24px;opacity:.85}
+#idle h1{font-size:clamp(54px,16vw,92px);line-height:.9;margin:0;letter-spacing:-.02em;font-weight:700}
+#idle h1 span{color:var(--marking)}
+#idle p{color:var(--muted);max-width:30ch;margin:14px auto 0;font-size:18px;text-wrap:balance}
+
+/* Top bar */
+#top{position:fixed;top:0;left:0;right:0;display:flex;justify-content:space-between;align-items:center;gap:12px;
+  padding-top:calc(env(safe-area-inset-top,0px) + 12px);padding-bottom:12px;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));
+  background:linear-gradient(to bottom,rgba(11,13,12,.85),rgba(11,13,12,0));pointer-events:none}
+.brand{font-weight:700;font-size:20px;letter-spacing:.02em}
+.brand b{color:var(--marking)}
+.pill{font-family:var(--mono);font-size:13px;letter-spacing:.06em;text-transform:uppercase;padding:6px 10px;border-radius:999px;background:rgba(20,23,20,.85);border:1px solid var(--line);display:flex;gap:8px;align-items:center;font-variant-numeric:tabular-nums}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--muted)}
+.pill[data-s="ready"] .dot{background:var(--marking)}
+.pill[data-s="live"] .dot{background:var(--clear);animation:pulse 1.4s infinite}
+.pill[data-s="error"] .dot{background:var(--danger)}
+@keyframes pulse{50%{opacity:.35}}
+
+/* Deck */
+#deck{position:fixed;left:0;right:0;bottom:0;background:var(--deck);border-top:1px solid var(--line);
+  padding-top:14px;padding-bottom:calc(env(safe-area-inset-bottom,0px) + 14px);
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));
+  display:grid;gap:14px}
+.inner{max-width:640px;width:100%;margin:0 auto;display:grid;gap:14px}
+
+#lanes{display:grid;grid-template-columns:1fr 1fr 1fr;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.zone{padding:10px 10px 9px;min-width:0;border-left:2px dashed var(--line);transition:background .2s}
+.zone:first-child{border-left:0}
+.zone .k{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.zone .v{font-weight:700;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:1.4em}
+.zone[data-l="1"] .v{color:var(--paper)}
+.zone[data-l="2"]{background:rgba(255,200,0,.14)}
+.zone[data-l="2"] .v{color:var(--marking)}
+.zone[data-l="3"]{background:rgba(255,74,61,.22)}
+.zone[data-l="3"] .v{color:var(--danger)}
+
+#alert{font-size:clamp(22px,6vw,30px);font-weight:700;line-height:1.2;min-height:2.4em;text-wrap:balance;margin:0}
+#alert[data-l="3"]{color:var(--danger)}
+#alert[data-l="2"]{color:var(--marking)}
+#alert[data-l="0"]{color:var(--clear)}
+#alert small{display:block;font-size:15px;font-weight:400;color:var(--muted);margin-top:4px}
+
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:stretch}
+.btn{min-height:60px;border-radius:12px;border:1px solid var(--line);background:#1C201C;padding:0 18px;font-weight:700;font-size:18px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:8px}
+.btn:active{transform:scale(.98)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+#go{flex:1 1 180px;background:var(--marking);color:#151200;border-color:var(--marking);font-size:22px}
+#go[aria-pressed="true"]{background:transparent;color:var(--marking)}
+#describe{flex:1 1 120px}
+#more{flex:0 0 60px;padding:0}
+
+.seg{display:flex;border:1px solid var(--line);border-radius:12px;overflow:hidden;flex:1 1 220px}
+.seg button{flex:1;min-height:48px;background:transparent;border:0;border-left:1px solid var(--line);font-weight:700;cursor:pointer}
+.seg button:first-child{border-left:0}
+.seg button[aria-pressed="true"]{background:var(--paper);color:var(--road)}
+#demoLbl{min-height:48px;font-size:16px;flex:1 1 140px}
+#demoFile{position:absolute;width:1px;height:1px;opacity:0}
+
+#settings{display:grid;gap:12px;padding:14px;border:1px solid var(--line);border-radius:12px}
+.set{display:flex;justify-content:space-between;align-items:center;gap:12px;min-height:44px}
+.set label{min-width:0}
+.set small{display:block;color:var(--muted);font-size:14px}
+.set input[type=checkbox]{width:28px;height:28px;accent-color:var(--marking);flex:none}
+.set input[type=range]{accent-color:var(--marking);width:140px;flex:none}
+.tag{font-family:var(--mono);font-size:11px;letter-spacing:.1em;color:var(--marking);border:1px solid var(--marking);border-radius:4px;padding:1px 5px;margin-left:6px;vertical-align:2px}
+.foot{font-family:var(--mono);font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="cam" playsinline muted autoplay></video>
+  <canvas id="overlay" aria-hidden="true"></canvas>
+  <div id="idle">
+    <div>
+      <div class="lane" aria-hidden="true"></div>
+      <h1>Raah<span>.</span></h1>
+      <p>Hold the phone at chest height with the back camera facing the road. Raah speaks what is in your path.</p>
+    </div>
+  </div>
+</div>
+
+<header id="top">
+  <div class="brand">R<b>aa</b>h</div>
+  <div class="pill" id="status" data-s="loading" role="status"><span class="dot"></span><span id="statusTxt">Loading model</span></div>
+</header>
+
+<section id="deck" aria-label="Raah controls">
+  <div class="inner">
+    <div id="lanes" aria-hidden="true">
+      <div class="zone" id="z-left"  data-l="0"><div class="k">Left</div><div class="v">—</div></div>
+      <div class="zone" id="z-ahead" data-l="0"><div class="k">Ahead</div><div class="v">—</div></div>
+      <div class="zone" id="z-right" data-l="0"><div class="k">Right</div><div class="v">—</div></div>
+    </div>
+
+    <p id="alert" aria-live="off">Tap Start to begin.<small>Double-tap the camera view to repeat the last alert.</small></p>
+
+    <div class="row">
+      <button class="btn" id="go" aria-pressed="false" disabled>Start</button>
+      <button class="btn" id="describe" disabled>Describe</button>
+      <button class="btn" id="more" aria-expanded="false" aria-controls="settings" aria-label="Settings">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+      </button>
+    </div>
+
+    <div id="settings" hidden>
+      <div class="row">
+        <div class="seg" role="group" aria-label="Voice language">
+          <button data-lang="en" aria-pressed="true">English</button>
+          <button data-lang="hi" aria-pressed="false" lang="hi">हिन्दी</button>
+          <button data-lang="ta" aria-pressed="false" lang="ta">தமிழ்</button>
+        </div>
+        <label class="btn" id="demoLbl" for="demoFile">Demo video</label>
+        <input type="file" id="demoFile" accept="video/*">
+      </div>
+      <div class="set"><label for="optVoice">Voice alerts<small>Turn off to let TalkBack or VoiceOver read alerts instead</small></label><input type="checkbox" id="optVoice" checked></div>
+      <div class="set"><label for="optRate">Speaking speed</label><input type="range" id="optRate" min="0.8" max="1.6" step="0.1" value="1.1"></div>
+      <div class="set"><label for="optHaptic">Vibration<small>Left: one long · Right: two short · Ahead: three pulses</small></label><input type="checkbox" id="optHaptic" checked></div>
+      <div class="set"><label for="optGround">Ground scan<span class="tag">BETA</span><small>Warns of dark gaps like potholes or open drains</small></label><input type="checkbox" id="optGround" checked></div>
+      <div class="set"><label for="optBoxes">Show boxes<small>For sighted helpers and judges</small></label><input type="checkbox" id="optBoxes" checked></div>
+    </div>
+
+    <div class="foot"><span id="fps">— fps</span><span id="lat">— ms</span><span>On-device · nothing uploaded</span></div>
+  </div>
+</section>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+<script>
+(() => {
+"use strict";
+const $ = s => document.querySelector(s);
+const video = $('#cam'), overlay = $('#overlay'), octx = overlay.getContext('2d');
+const scan = document.createElement('canvas'); scan.width = 64; scan.height = 48;
+const sctx = scan.getContext('2d', { willReadFrequently: true });
+
+/* ---------- Vocabulary ---------- */
+// w = how dangerous this thing is to walk into (vehicles highest)
+const OBJ = {
+  car:            { w:3,   en:['car','cars'],                 hi:'कार',        ta:'கார்' },
+  motorcycle:     { w:3,   en:['bike','bikes'],               hi:'बाइक',       ta:'பைக்' },
+  bus:            { w:3,   en:['bus','buses'],                hi:'बस',         ta:'பஸ்' },
+  truck:          { w:3,   en:['truck','trucks'],             hi:'ट्रक',        ta:'லாரி' },
+  bicycle:        { w:2,   en:['cycle','cycles'],             hi:'साइकिल',     ta:'சைக்கிள்' },
+  cow:            { w:2.5, en:['cow','cows'],                 hi:'गाय',        ta:'மாடு' },
+  horse:          { w:2.5, en:['horse','horses'],             hi:'घोड़ा',       ta:'குதிரை' },
+  dog:            { w:2,   en:['dog','dogs'],                 hi:'कुत्ता',      ta:'நாய்' },
+  person:         { w:1.5, en:['person','people'],            hi:'व्यक्ति',     ta:'ஆள்' },
+  cat:            { w:1,   en:['cat','cats'],                 hi:'बिल्ली',     ta:'பூனை' },
+  bench:          { w:1.2, en:['bench','benches'],            hi:'बेंच',        ta:'பெஞ்ச்' },
+  chair:          { w:1.2, en:['chair','chairs'],             hi:'कुर्सी',      ta:'நாற்காலி' },
+  'potted plant': { w:1,   en:['plant pot','plant pots'],     hi:'गमला',       ta:'பூந்தொட்டி' },
+  'fire hydrant': { w:1.2, en:['hydrant','hydrants'],         hi:'पाइप',       ta:'குழாய்' },
+  'traffic light':{ w:1,   en:['traffic signal','signals'],   hi:'सिग्नल',     ta:'சிக்னல்' },
+  'stop sign':    { w:1,   en:['stop sign','stop signs'],     hi:'स्टॉप बोर्ड',  ta:'நிறுத்த பலகை' }
+};
+const L10N = {
+  en:{ code:'en-IN', dir:{left:'on your left',ahead:'ahead',right:'on your right'}, zone:{left:'Left',ahead:'Ahead',right:'Right'},
+       dist:{3:'very close',2:'near',1:'far'}, approach:'coming closer', stop:'Stop!', clear:'Path looks clear',
+       nothing:'Nothing detected around you', on:'Raah is on.', off:'Raah paused', pothole:'Careful. Possible pothole or drop ahead.',
+       name:(c,n)=> n>1 ? `${n} ${OBJ[c].en[1]}` : `a ${OBJ[c].en[0]}`, one:c=>OBJ[c].en[0],
+       cap:s=>s.charAt(0).toUpperCase()+s.slice(1) },
+  hi:{ code:'hi-IN', dir:{left:'बाईं ओर',ahead:'सामने',right:'दाईं ओर'}, zone:{left:'बाएँ',ahead:'सामने',right:'दाएँ'},
+       dist:{3:'बहुत पास',2:'पास',1:'दूर'}, approach:'नज़दीक आ रहा है', stop:'रुकिए!', clear:'रास्ता साफ़ लगता है',
+       nothing:'आसपास कुछ नहीं दिखा', on:'राह चालू है।', off:'राह रुका है', pothole:'सावधान। सामने गड्ढा हो सकता है।',
+       name:(c,n)=> n>1 ? `${n} ${OBJ[c].hi}` : OBJ[c].hi, one:c=>OBJ[c].hi, cap:s=>s },
+  ta:{ code:'ta-IN', dir:{left:'இடது பக்கம்',ahead:'முன்னால்',right:'வலது பக்கம்'}, zone:{left:'இடது',ahead:'முன்',right:'வலது'},
+       dist:{3:'மிக அருகில்',2:'அருகில்',1:'தொலைவில்'}, approach:'நெருங்குகிறது', stop:'நில்லுங்கள்!', clear:'வழி தெளிவாக உள்ளது',
+       nothing:'சுற்றிலும் எதுவும் இல்லை', on:'ராஹ் இயங்குகிறது.', off:'ராஹ் நிறுத்தப்பட்டது', pothole:'கவனம். முன்னால் பள்ளம் இருக்கலாம்.',
+       name:(c,n)=> n>1 ? `${n} ${OBJ[c].ta}` : OBJ[c].ta, one:c=>OBJ[c].ta, cap:s=>s }
+};
+
+/* ---------- State ---------- */
+const state = { lang:'en', voice:true, rate:1.1, haptic:true, ground:true, boxes:true, running:false, source:null };
+try { Object.assign(state, JSON.parse(localStorage.getItem('raah-settings') || '{}'), { running:false, source:null }); } catch (e) {}
+const save = () => { try { localStorage.setItem('raah-settings', JSON.stringify({ lang:state.lang, voice:state.voice, rate:state.rate, haptic:state.haptic, ground:state.ground, boxes:state.boxes })); } catch (e) {} };
+const T = () => L10N[state.lang];
+
+let model = null, busy = false, raf = 0, stream = null, wakeLock = null;
+let tracks = [], nextId = 1, lastAnalyses = [];
+const lastSaid = new Map(); let lastAnyAt = 0, lastHazardAt = 0, saidClear = true, lastAlert = null, groundHits = 0, lastGroundAt = 0;
+let fpsAvg = 0, latAvg = 0, lastFrameAt = 0;
+
+/* ---------- UI helpers ---------- */
+const statusEl = $('#status'), statusTxt = $('#statusTxt'), alertEl = $('#alert');
+function setStatus(s, txt){ statusEl.dataset.s = s; statusTxt.textContent = txt; }
+function showAlert(text, lvl, sub){
+  alertEl.dataset.l = String(lvl);
+  alertEl.textContent = text;
+  if (sub) { const sm = document.createElement('small'); sm.textContent = sub; alertEl.appendChild(sm); }
+}
+function syncSettingsUI(){
+  document.querySelectorAll('[data-lang]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.lang === state.lang)));
+  $('#optVoice').checked = state.voice; $('#optRate').value = state.rate; $('#optHaptic').checked = state.haptic;
+  $('#optGround').checked = state.ground; $('#optBoxes').checked = state.boxes;
+  alertEl.setAttribute('aria-live', state.voice ? 'off' : 'assertive');
+  for (const z of ['left','ahead','right']) document.querySelector(`#z-${z} .k`).textContent = T().zone[z];
+  document.documentElement.lang = state.lang;
+}
+
+/* ---------- Speech + haptics ---------- */
+let voices = [];
+function loadVoices(){ voices = (window.speechSynthesis && speechSynthesis.getVoices()) || []; }
+if ('speechSynthesis' in window) { loadVoices(); speechSynthesis.onvoiceschanged = loadVoices; }
+function pickVoice(){
+  const code = T().code, base = code.slice(0,2);
+  return voices.find(v => v.lang === code) || voices.find(v => v.lang && v.lang.replace('_','-').startsWith(base)) || null;
+}
+function speak(text, urgent){
+  if (!state.voice || !('speechSynthesis' in window)) return true;
+  if (urgent) speechSynthesis.cancel();
+  else if (speechSynthesis.speaking || speechSynthesis.pending) return false;
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = T().code; u.rate = state.rate;
+  const v = pickVoice(); if (v) u.voice = v;
+  speechSynthesis.speak(u);
+  return true;
+}
+function buzz(dir, lvl){
+  if (!state.haptic || !navigator.vibrate) return;
+  const k = lvl >= 3 ? 1.6 : 1;
+  const p = dir === 'left' ? [450] : dir === 'right' ? [120,90,120] : [160,80,160,80,160];
+  navigator.vibrate(p.map((x,i) => i % 2 ? x : Math.round(x * k)));
+}
+
+/* ---------- Tracking ---------- */
+const area = b => b[2] * b[3];
+function iou(a, b){
+  const x1 = Math.max(a[0], b[0]), y1 = Math.max(a[1], b[1]);
+  const x2 = Math.min(a[0]+a[2], b[0]+b[2]), y2 = Math.min(a[1]+a[3], b[1]+b[3]);
+  const inter = Math.max(0, x2-x1) * Math.max(0, y2-y1);
+  return inter / (area(a) + area(b) - inter || 1);
+}
+function updateTracks(dets, t){
+  const used = new Set(), next = [];
+  for (const d of dets) {
+    let best = null, bi = 0;
+    for (const tr of tracks) {
+      if (used.has(tr.id) || tr.cls !== d.class) continue;
+      const v = iou(tr.box, d.bbox); if (v > bi) { bi = v; best = tr; }
+    }
+    if (best && bi > 0.2) {
+      used.add(best.id); best.box = d.bbox; best.score = d.score; best.hits++; best.seen = t;
+      best.hist.push({ t, a: area(d.bbox) });
+      while (best.hist.length > 2 && t - best.hist[0].t > 1200) best.hist.shift();
+      next.push(best);
+    } else {
+      next.push({ id: nextId++, cls: d.class, box: d.bbox, score: d.score, hits: 1, seen: t, hist: [{ t, a: area(d.bbox) }] });
+    }
+  }
+  // keep briefly-missed tracks for 400ms so a flicker does not reset them
+  for (const tr of tracks) if (!used.has(tr.id) && t - tr.seen < 400 && !next.includes(tr)) next.push(tr);
+  tracks = next;
+}
+function analyze(tr, W, H, t){
+  const [x, y, w, h] = tr.box;
+  const cx = (x + w/2) / W;
+  const dir = cx < 0.36 ? 'left' : cx > 0.64 ? 'right' : 'ahead';
+  const ar = (w*h) / (W*H), hr = h / H;
+  const lvl = (ar > 0.22 || hr > 0.7) ? 3 : (ar > 0.06 || hr > 0.38) ? 2 : 1;
+  const hs = tr.hist, first = hs[0], last = hs[hs.length-1];
+  const approaching = hs.length >= 3 && last.t - first.t > 350 && last.a / first.a > 1.35;
+  const wgt = OBJ[tr.cls].w;
+  const score = wgt * Math.pow(lvl, 1.6) * (dir === 'ahead' ? 1.5 : 1) * (approaching ? 1.6 : 1);
+  return { id: tr.id, cls: tr.cls, box: tr.box, dir, lvl, approaching, score, hits: tr.hits, fresh: t - tr.seen < 50 };
+}
+
+/* ---------- Deciding what to say ---------- */
+function sentenceFor(a){
+  const L = T();
+  const parts = [L.cap(L.one(a.cls)), L.dir[a.dir]];
+  parts.push(a.approaching && a.lvl < 3 ? L.approach : L.dist[a.lvl]);
+  return state.lang === 'en' ? `${parts[0]} ${parts[1]}, ${parts[2]}` : `${parts[0]} ${parts[1]}, ${parts[2]}`;
+}
+function decide(analyses, t){
+  const cands = analyses.filter(a => a.hits >= 2 && (a.lvl >= 2 || a.approaching)).sort((p, q) => q.score - p.score);
+  const top = cands[0];
+  if (top) {
+    lastHazardAt = t; saidClear = false;
+    const urgent = top.lvl === 3 && OBJ[top.cls].w >= 2 && top.dir === 'ahead';
+    const key = `${top.cls}|${top.dir}|${top.lvl}|${top.approaching}`;
+    const cooldown = top.lvl === 3 ? 1800 : 4500;
+    if (t - (lastSaid.get(key) || 0) > cooldown && t - lastAnyAt > (urgent ? 500 : 1100)) {
+      const text = (urgent ? T().stop + ' ' : '') + sentenceFor(top);
+      if (speak(text, urgent)) {
+        lastSaid.set(key, t); lastAnyAt = t; lastAlert = { text, lvl: top.lvl, urgent };
+        showAlert(text, top.lvl);
+        buzz(top.dir, top.lvl);
+      }
+    }
+  } else if (!saidClear && t - lastHazardAt > 6000) {
+    if (speak(T().clear, false)) { saidClear = true; lastAnyAt = t; lastAlert = { text: T().clear, lvl: 0 }; showAlert(T().clear, 0); }
+  }
+}
+function describeScene(){
+  const L = T(), groups = { left:{}, ahead:{}, right:{} };
+  for (const a of lastAnalyses) if (a.hits >= 2) groups[a.dir][a.cls] = (groups[a.dir][a.cls] || 0) + 1;
+  const bits = [];
+  for (const z of ['ahead','left','right']) {
+    const items = Object.entries(groups[z]).map(([c, n]) => L.name(c, n));
+    if (items.length) bits.push(`${L.zone[z]}: ${items.join(', ')}`);
+  }
+  const text = bits.length ? bits.join('. ') + '.' : L.nothing;
+  speak(text, true); lastAlert = { text, lvl: 1 }; showAlert(text, 1);
+}
+
+/* ---------- Ground scan (beta): dark, edgy patch in the walking lane ---------- */
+function groundScan(t){
+  if (!state.ground || !video.videoWidth) return;
+  sctx.drawImage(video, 0, 0, 64, 48);
+  const y0 = 30, rows = 18, img = sctx.getImageData(0, y0, 64, rows).data;
+  const lum = new Float32Array(64 * rows);
+  for (let i = 0; i < lum.length; i++) lum[i] = 0.299*img[i*4] + 0.587*img[i*4+1] + 0.114*img[i*4+2];
+  const zone = (c0, c1) => {
+    let m = 0, e = 0, n = 0;
+    for (let r = 1; r < rows; r++) for (let c = c0 + 1; c < c1; c++) {
+      const v = lum[r*64 + c]; m += v; n++;
+      e += Math.abs(v - lum[r*64 + c - 1]) + Math.abs(v - lum[(r-1)*64 + c]);
+    }
+    return { m: m / n, e: e / n };
+  };
+  const L = zone(0, 21), C = zone(21, 43), R = zone(43, 64);
+  const side = (L.m + R.m) / 2, sideE = (L.e + R.e) / 2;
+  const hit = side > 45 && C.m < side * 0.6 && C.e > sideE * 1.2;
+  groundHits = hit ? groundHits + 1 : Math.max(0, groundHits - 1);
+  if (groundHits >= 6 && t - lastGroundAt > 6000) {
+    groundHits = 0;
+    if (speak(T().pothole, true)) { lastGroundAt = t; lastAnyAt = t; lastAlert = { text: T().pothole, lvl: 2 }; showAlert(T().pothole, 2); buzz('ahead', 2); }
+  }
+}
+
+/* ---------- Drawing ---------- */
+function fitCanvas(){
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = overlay.clientWidth, h = overlay.clientHeight;
+  if (overlay.width !== Math.round(w*dpr) || overlay.height !== Math.round(h*dpr)) { overlay.width = Math.round(w*dpr); overlay.height = Math.round(h*dpr); }
+  octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { w, h };
+}
+const COLORS = { 1:'#F4F2EA', 2:'#FFC800', 3:'#FF4A3D' };
+function draw(analyses){
+  const { w: cw, h: ch } = fitCanvas();
+  octx.clearRect(0, 0, cw, ch);
+  if (!state.boxes || !video.videoWidth) return;
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const s = Math.max(cw / vw, ch / vh), ox = (cw - vw*s) / 2, oy = (ch - vh*s) / 2;
+  octx.font = '700 13px "Atkinson Hyperlegible Mono", ui-monospace, monospace';
+  for (const a of analyses) {
+    if (a.hits < 2) continue;
+    const [x, y, w, h] = a.box, X = ox + x*s, Y = oy + y*s, Wd = w*s, Hd = h*s, col = COLORS[a.lvl];
+    octx.lineWidth = a.lvl === 3 ? 4 : 2.5; octx.strokeStyle = col;
+    octx.setLineDash(a.lvl === 1 ? [6, 6] : []);
+    octx.strokeRect(X, Y, Wd, Hd); octx.setLineDash([]);
+    const label = `${OBJ[a.cls].en[0].toUpperCase()} · ${L10N.en.dist[a.lvl].toUpperCase()}${a.approaching ? ' ↑' : ''}`;
+    const tw = octx.measureText(label).width + 12, ty = Math.max(Y - 22, 0);
+    octx.fillStyle = col; octx.fillRect(X, ty, tw, 22);
+    octx.fillStyle = '#0B0D0C'; octx.fillText(label, X + 6, ty + 15);
+  }
+}
+function updateLanes(analyses){
+  const L = T();
+  for (const z of ['left','ahead','right']) {
+    const inZone = analyses.filter(a => a.dir === z && a.hits >= 2).sort((p, q) => q.score - p.score);
+    const el = document.getElementById('z-' + z);
+    el.dataset.l = inZone.length ? String(inZone[0].lvl) : '0';
+    el.querySelector('.v').textContent = inZone.length ? L.cap(L.one(inZone[0].cls)) + (inZone.length > 1 ? ` +${inZone.length - 1}` : '') : '—';
+  }
+}
+
+/* ---------- Main loop ---------- */
+async function tick(){
+  if (!state.running) return;
+  if (!busy && video.readyState >= 2 && video.videoWidth) {
+    busy = true;
+    const t0 = performance.now();
+    try {
+      const preds = await model.detect(video, 20, 0.45);
+      const t = performance.now();
+      const dets = preds.filter(p => OBJ[p.class]);
+      updateTracks(dets, t);
+      lastAnalyses = tracks.map(tr => analyze(tr, video.videoWidth, video.videoHeight, t));
+      draw(lastAnalyses); updateLanes(lastAnalyses); decide(lastAnalyses, t); groundScan(t);
+      const lat = t - t0; latAvg = latAvg ? latAvg*0.9 + lat*0.1 : lat;
+      if (lastFrameAt) { const f = 1000 / (t - lastFrameAt); fpsAvg = fpsAvg ? fpsAvg*0.9 + f*0.1 : f; }
+      lastFrameAt = t;
+      $('#fps').textContent = fpsAvg.toFixed(1) + ' fps'; $('#lat').textContent = Math.round(latAvg) + ' ms';
+    } catch (e) { console.error(e); }
+    busy = false;
+  }
+  raf = requestAnimationFrame(tick);
+}
+
+async function startCamera(){
+  if (!window.isSecureContext) throw new Error('insecure');
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('nocam');
+  stream = await navigator.mediaDevices.getUserMedia({ audio:false, video:{ facingMode:{ ideal:'environment' }, width:{ ideal:640 }, height:{ ideal:480 } } });
+  video.removeAttribute('src'); video.srcObject = stream; await video.play();
+  state.source = 'camera';
+}
+async function start(){
+  speak(T().on, true); // must run inside the tap so phones unlock speech
+  try {
+    if (state.source !== 'video') await startCamera();
+    else await video.play();
+  } catch (e) {
+    const msg = e.message === 'insecure' ? 'Camera needs a secure link (https). Open Raah from GitHub Pages or Vercel, or use Demo video.'
+      : e.name === 'NotAllowedError' ? 'Camera permission was denied. Allow camera access in your browser settings, then tap Start.'
+      : e.message === 'nocam' || e.name === 'NotFoundError' ? 'No camera found on this device. Use Demo video instead.'
+      : 'Could not start the camera: ' + (e.message || e.name);
+    showAlert(msg, 2); setStatus('error', 'Camera off'); return;
+  }
+  state.running = true; $('#idle').hidden = true;
+  $('#go').textContent = 'Stop'; $('#go').setAttribute('aria-pressed', 'true'); $('#describe').disabled = false;
+  setStatus('live', state.source === 'video' ? 'Demo' : 'Watching');
+  showAlert(T().on, 0);
+  try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+  tick();
+}
+function stop(){
+  state.running = false; cancelAnimationFrame(raf);
+  if (state.source === 'camera' && stream) { stream.getTracks().forEach(t => t.stop()); stream = null; video.srcObject = null; state.source = null; }
+  else if (state.source === 'video') video.pause();
+  try { wakeLock && wakeLock.release(); } catch (e) {} wakeLock = null;
+  tracks = []; lastAnalyses = []; draw([]); updateLanes([]);
+  $('#go').textContent = 'Start'; $('#go').setAttribute('aria-pressed', 'false'); $('#describe').disabled = true;
+  setStatus('ready', 'Ready'); showAlert(T().off, 1); speak(T().off, true);
+}
+
+/* ---------- Events ---------- */
+$('#go').addEventListener('click', () => state.running ? stop() : start());
+$('#describe').addEventListener('click', describeScene);
+$('#more').addEventListener('click', () => {
+  const s = $('#settings'); s.hidden = !s.hidden; $('#more').setAttribute('aria-expanded', String(!s.hidden));
+});
+document.querySelectorAll('[data-lang]').forEach(b => b.addEventListener('click', () => {
+  state.lang = b.dataset.lang; save(); syncSettingsUI(); lastSaid.clear(); speak(T().on, true);
+}));
+$('#optVoice').addEventListener('change', e => { state.voice = e.target.checked; save(); syncSettingsUI(); if (!state.voice && 'speechSynthesis' in window) speechSynthesis.cancel(); });
+$('#optRate').addEventListener('input', e => { state.rate = parseFloat(e.target.value); save(); });
+$('#optHaptic').addEventListener('change', e => { state.haptic = e.target.checked; save(); });
+$('#optGround').addEventListener('change', e => { state.ground = e.target.checked; save(); });
+$('#optBoxes').addEventListener('change', e => { state.boxes = e.target.checked; save(); if (!state.boxes) draw([]); });
+$('#demoFile').addEventListener('change', e => {
+  const f = e.target.files && e.target.files[0]; if (!f) return;
+  if (state.running) stop();
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  video.srcObject = null; video.src = URL.createObjectURL(f); video.loop = true; video.muted = true;
+  state.source = 'video'; showAlert('Demo video loaded. Tap Start.', 1, f.name);
+});
+let lastTap = 0;
+$('#stage').addEventListener('pointerup', () => {
+  const now = Date.now();
+  if (now - lastTap < 350 && lastAlert) { speak(lastAlert.text, true); showAlert(lastAlert.text, lastAlert.lvl); }
+  lastTap = now;
+});
+document.addEventListener('keydown', e => {
+  if (e.target.closest('input,select')) return;
+  if (e.code === 'Space') { e.preventDefault(); $('#go').click(); }
+  if (e.key === 'd' && !$('#describe').disabled) describeScene();
+});
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'visible' && state.running && !wakeLock) { try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {} }
+  else if (document.visibilityState === 'hidden') wakeLock = null;
+});
+window.addEventListener('resize', () => draw(lastAnalyses));
+
+/* ---------- Boot ---------- */
+syncSettingsUI();
+(async () => {
+  try {
+    if (!window.cocoSsd || !window.tf) throw new Error('The detection library did not load. Check the internet connection and reload.');
+    await tf.ready();
+    model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+    // warm up once so the first real frame is fast
+    const z = tf.zeros([240, 320, 3], 'int32'); await model.detect(z); z.dispose();
+    setStatus('ready', 'Ready'); $('#go').disabled = false;
+  } catch (e) {
+    console.error(e); setStatus('error', 'Model failed');
+    showAlert('The detection model could not load.', 2, e.message || String(e));
+  }
+})();
+})();
+</script>
+</body>
+</html>
